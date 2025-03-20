@@ -255,44 +255,50 @@ class Replica:
         assert os.path.getsize(self.log_fname) == self.state['max_pos']
         sz = bipf.varint_encode_to_bytes(len(content))
 
-        root_chunk = content[:28-len(sz)] # the first bytes fit on root
+        root_content_length = 28 - len(sz)
+        root_content = content[:root_content_length] # the first bytes fit on root
 
         # prep the chunks
-        content = content[28-len(sz):] # skip first bytes that were in root
-        i = len(content) % 100    # 240 => 240 % 100 = 40... we want to pad content to be 300 add (100-40) = 60
+        content = content[root_content_length:] # skip over root_content
+        chunk_content_length = 100
+        # pad so all chunk content is size 100
+        i = len(content) % chunk_content_length
         if i > 0:
-            pad = bytes(100-i) # pad the remaining chunk content to be multiples of 100
+            pad = bytes(chunk_content_length - i)
             content += pad
 
         ## we build the hash-chain of chunks from the end to the start
         ptr = bytes(20) # end of chain is signalled by all-zero "hash"
         chunks = []
         while len(content) > 0:
-            buf = content[-100:] + ptr
+            buf = content[-chunk_content_length:] + ptr
             chunks.append(buf)
             ptr = hashlib.sha256(buf).digest()[:20]
-            content = content[:-100]
+            content = content[:-chunk_content_length]
         chunks.reverse()
 
         # prep the root message
         seq = self.state['max_seq'] + 1
         nam = PFX + self.fid + seq.to_bytes(4,'big') + self.state['prev']
         dmx = hashlib.sha256(nam).digest()[:7]
-        payload = sz + root_chunk + ptr
+        payload = sz + root_content + ptr
         msg = dmx + bytes([PKTTYPE_chain20]) + payload
         wire = msg + sign_fct(nam + msg)
 
         assert len(wire) == 120
         assert self.verify_fct(self.fid, wire[56:], nam + wire[:56])
 
+        # write to log
         chunks.insert(0, wire)
-
         log_entry = b''.join(chunks)
         log_entry += self.state['max_pos'].to_bytes(4, 'big')
         with open(self.log_fname, 'ab') as f:
             f.write(log_entry)
+
+        # ??
         self._persist_frontier(seq, self.state['max_pos'] + len(log_entry),
                                hashlib.sha256(nam + wire).digest()[:20])
+
         return seq
 
     # ----------------------------------------------------------------------
