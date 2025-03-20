@@ -253,32 +253,40 @@ class Replica:
 
     def write(self, content, sign_fct): # publish event, returns seq or None
         assert os.path.getsize(self.log_fname) == self.state['max_pos']
-        chunks = []
-        seq = self.state['max_seq'] + 1
         sz = bipf.varint_encode_to_bytes(len(content))
-        payload = sz + content[:28-len(sz)]
-        if len(payload) != 28:
-            payload += bytes(28 - len(payload))
-        content = content[28-len(sz):]
-        i = len(content) % 100
+
+        root_chunk = content[:28-len(sz)] # the first bytes fit on root
+
+        # prep the chunks
+        content = content[28-len(sz):] # skip first bytes that were in root
+        i = len(content) % 100    # 240 => 240 % 100 = 40... we want to pad content to be 300 add (100-40) = 60
         if i > 0:
-            content += bytes(100-i)
-        ptr = bytes(20)
+            pad = bytes(100-i) # pad the remaining chunk content to be multiples of 100
+            content += pad
+
+        ## we build the hash-chain of chunks from the end to the start
+        ptr = bytes(20) # end of chain is signalled by all-zero "hash"
+        chunks = []
         while len(content) > 0:
             buf = content[-100:] + ptr
             chunks.append(buf)
             ptr = hashlib.sha256(buf).digest()[:20]
             content = content[:-100]
         chunks.reverse()
-        payload += ptr
-        nam = PFX + self.fid + seq.to_bytes(4,'big') + \
-              self.state['prev']
+
+        # prep the root message
+        seq = self.state['max_seq'] + 1
+        nam = PFX + self.fid + seq.to_bytes(4,'big') + self.state['prev']
         dmx = hashlib.sha256(nam).digest()[:7]
+        payload = sz + root_chunk + ptr
         msg = dmx + bytes([PKTTYPE_chain20]) + payload
         wire = msg + sign_fct(nam + msg)
+
         assert len(wire) == 120
         assert self.verify_fct(self.fid, wire[56:], nam + wire[:56])
+
         chunks.insert(0, wire)
+
         log_entry = b''.join(chunks)
         log_entry += self.state['max_pos'].to_bytes(4, 'big')
         with open(self.log_fname, 'ab') as f:
@@ -286,9 +294,8 @@ class Replica:
         self._persist_frontier(seq, self.state['max_pos'] + len(log_entry),
                                hashlib.sha256(nam + wire).digest()[:20])
         return seq
-    
+
     # ----------------------------------------------------------------------
-    
     pass
 
 # eof
